@@ -69,19 +69,57 @@ namespace StreamCompaction {
                 // Call upsweep kern function w/ rounded n val.
                 kernUpsweep << < fullBlocksPerGrid, blockSize >> > (round_n, d, dev_buffer);
                 checkCUDAError("kernUpsweep failed.");
+                cudaDeviceSynchronize();
             }
 
             // Downsweep. 
             // Set (round_n - 1) val in dev_buffer = 0.
             cudaMemset(dev_buffer + (round_n - 1), 0, sizeof(int));
-            for (int d = ilog2ceil(n); d >= 0; d--) {
+            for (int d = ilog2ceil(n) - 1; d >= 0; d--) {
                 // Call downsweep kern func.
                 kernDownsweep << < fullBlocksPerGrid, blockSize >> > (round_n, d, dev_buffer);
+                checkCUDAError("kernDownsweep failed.");
+                cudaDeviceSynchronize();
             }
 ;           timer().endGpuTimer();
 
             // Copy data back to host from dev_buffer.
-            cudaMemcpy(odata, dev_buffer, round_n * sizeof(int), cudaMemcpyDeviceToHost);
+            cudaMemcpy(odata, dev_buffer, n * sizeof(int), cudaMemcpyDeviceToHost);
+            cudaFree(dev_buffer);
+        }
+
+        // Device-only scan to mitigate timer issues.
+        void scanDevice(int n, int* odata, const int* idata) {
+            int round_n = 1 << ilog2ceil(n);
+
+            // Allocate temp buffer
+            int* dev_buffer;
+            cudaMalloc((void**)&dev_buffer, round_n * sizeof(int));
+            checkCUDAError("cudaMalloc failed to create buffer.");
+
+            cudaMemset(dev_buffer, 0, round_n * sizeof(int));
+            cudaMemcpy(dev_buffer, idata, n * sizeof(int), cudaMemcpyDeviceToDevice);
+
+            dim3 fullBlocksPerGrid((round_n + blockSize - 1) / blockSize);
+
+            // Upsweep
+            for (int d = 0; d < ilog2ceil(n); d++) {
+                kernUpsweep << <fullBlocksPerGrid, blockSize >> > (round_n, d, dev_buffer);
+                checkCUDAError("kernUpsweep failed.");
+                cudaDeviceSynchronize();
+            }
+
+            // Downsweep
+            cudaMemset(dev_buffer + (round_n - 1), 0, sizeof(int));
+            for (int d = ilog2ceil(n) - 1; d >= 0; d--) {
+                kernDownsweep << <fullBlocksPerGrid, blockSize >> > (round_n, d, dev_buffer);
+                checkCUDAError("kernDownsweep failed.");
+                cudaDeviceSynchronize();
+            }
+
+            // Copy result into dev_out
+            cudaMemcpy(odata, dev_buffer, n * sizeof(int), cudaMemcpyDeviceToDevice);
+
             cudaFree(dev_buffer);
         }
 
@@ -95,10 +133,66 @@ namespace StreamCompaction {
          * @returns      The number of elements remaining after compaction.
          */
         int compact(int n, int *odata, const int *idata) {
+
+            int* dev_idata;
+            int* dev_odata;
+            int* dev_flagged;
+            int* dev_scanned;
+
+            int round_n = 1 << ilog2ceil(n);
+
+            // Create buffers.
+            cudaMalloc((void**)&dev_idata, n * sizeof(int));
+            checkCUDAError("cudaMalloc failed to create buffer.");
+
+            cudaMalloc((void**)&dev_odata, n * sizeof(int));
+            checkCUDAError("cudaMalloc failed to create buffer.");
+
+            cudaMalloc((void**)&dev_flagged, n * sizeof(int));
+            checkCUDAError("cudaMalloc failed to create flagged array.");
+
+            cudaMalloc((void**)&dev_scanned, n * sizeof(int));
+            checkCUDAError("cudaMalloc failed to create scanned array.");
+
+            // Copy data from idata input to dev_idata.
+            cudaMemcpy(dev_idata, idata, n * sizeof(int), cudaMemcpyHostToDevice);
+
+            dim3 fullBlocksPerGrid((n + blockSize - 1) / blockSize);
+
             timer().startGpuTimer();
             // TODO
+            // Step 1: Flag data that belongs w/ temp array flagged.
+            // Call kernMapToBoolean w/ dev_flagged array.
+            StreamCompaction::Common::kernMapToBoolean << <fullBlocksPerGrid, blockSize >> > (n, dev_flagged, dev_idata);
+            cudaDeviceSynchronize();
+
+            // Step 2: Call efficient scan function, output = dev_scanned, input = dev_flagged.
+            scanDevice(n, dev_scanned, dev_flagged);
+            cudaDeviceSynchronize();
+
+            // Step 3: Scatter.
+            StreamCompaction::Common::kernScatter << <fullBlocksPerGrid, blockSize >> > (n, dev_odata, dev_idata, dev_flagged, dev_scanned);
+            cudaDeviceSynchronize();
+
             timer().endGpuTimer();
-            return -1;
+
+            int lastFlag = 0;
+            int lastScan = 0;
+
+            cudaMemcpy(&lastFlag, dev_flagged + (n - 1), sizeof(int), cudaMemcpyDeviceToHost);
+            cudaMemcpy(&lastScan, dev_scanned + (n - 1), sizeof(int), cudaMemcpyDeviceToHost);
+
+            int counter = lastScan + lastFlag;
+
+            // Copy data from dev_odata to odata.
+            cudaMemcpy(odata, dev_odata, counter * sizeof(int), cudaMemcpyDeviceToHost);
+
+            cudaFree(dev_idata);
+            cudaFree(dev_odata);
+            cudaFree(dev_flagged);
+            cudaFree(dev_scanned);
+
+            return counter;
         }
     }
 }
