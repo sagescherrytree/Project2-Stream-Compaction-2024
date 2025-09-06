@@ -59,13 +59,18 @@ namespace StreamCompaction {
             cudaMemset(dev_buffer, 0, round_n * sizeof(int));
             cudaMemcpy(dev_buffer, idata, n * sizeof(int), cudaMemcpyHostToDevice);
 
-            dim3 fullBlocksPerGrid((n + blockSize - 1) / blockSize);
-
             timer().startGpuTimer();
             // TODO
 
             // Upsweep.
             for (int d = 0; d < ilog2ceil(n); d++) {
+                // Optimisation to get faster runtime.
+                int nodes = round_n >> (d + 1);
+                if (nodes == 0) {
+                    break;
+                }
+                // Call fullBlocksPerGrid with new node size.
+                dim3 fullBlocksPerGrid((nodes + blockSize - 1) / blockSize);
                 // Call upsweep kern function w/ rounded n val.
                 kernUpsweep << < fullBlocksPerGrid, blockSize >> > (round_n, d, dev_buffer);
                 checkCUDAError("kernUpsweep failed.");
@@ -76,6 +81,13 @@ namespace StreamCompaction {
             // Set (round_n - 1) val in dev_buffer = 0.
             cudaMemset(dev_buffer + (round_n - 1), 0, sizeof(int));
             for (int d = ilog2ceil(n) - 1; d >= 0; d--) {
+                // Optimisation to get faster runtime.
+                int nodes = round_n >> (d + 1);
+                if (nodes == 0) {
+                    break;
+                }
+                // Call fullBlocksPerGrid with new node size.
+                dim3 fullBlocksPerGrid((nodes + blockSize - 1) / blockSize);
                 // Call downsweep kern func.
                 kernDownsweep << < fullBlocksPerGrid, blockSize >> > (round_n, d, dev_buffer);
                 checkCUDAError("kernDownsweep failed.");
@@ -104,6 +116,13 @@ namespace StreamCompaction {
 
             // Upsweep
             for (int d = 0; d < ilog2ceil(n); d++) {
+                // Optimisation to get faster runtime.
+                int nodes = round_n >> (d + 1);
+                if (nodes == 0) {
+                    break;
+                }
+                // Call fullBlocksPerGrid with new node size.
+                dim3 fullBlocksPerGrid((nodes + blockSize - 1) / blockSize);
                 kernUpsweep << <fullBlocksPerGrid, blockSize >> > (round_n, d, dev_buffer);
                 checkCUDAError("kernUpsweep failed.");
                 cudaDeviceSynchronize();
@@ -112,6 +131,13 @@ namespace StreamCompaction {
             // Downsweep
             cudaMemset(dev_buffer + (round_n - 1), 0, sizeof(int));
             for (int d = ilog2ceil(n) - 1; d >= 0; d--) {
+                // Optimisation to get faster runtime.
+                int nodes = round_n >> (d + 1);
+                if (nodes == 0) {
+                    break;
+                }
+                // Call fullBlocksPerGrid with new node size.
+                dim3 fullBlocksPerGrid((nodes + blockSize - 1) / blockSize);
                 kernDownsweep << <fullBlocksPerGrid, blockSize >> > (round_n, d, dev_buffer);
                 checkCUDAError("kernDownsweep failed.");
                 cudaDeviceSynchronize();
