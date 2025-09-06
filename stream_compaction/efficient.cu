@@ -101,50 +101,35 @@ namespace StreamCompaction {
         }
 
         // Device-only scan to mitigate timer issues.
-        void scanDevice(int n, int* odata, const int* idata) {
+        void scanDevice(int n, int* dev_odata, const int* dev_idata) {
+            // dev_idata: input device array
+            // dev_odata: output device array (pre-allocated)
+
+            int* dev_buffer;
             int round_n = 1 << ilog2ceil(n);
 
-            // Allocate temp buffer
-            int* dev_buffer;
             cudaMalloc((void**)&dev_buffer, round_n * sizeof(int));
-            checkCUDAError("cudaMalloc failed to create buffer.");
-
             cudaMemset(dev_buffer, 0, round_n * sizeof(int));
-            cudaMemcpy(dev_buffer, idata, n * sizeof(int), cudaMemcpyDeviceToDevice);
+            cudaMemcpy(dev_buffer, dev_idata, n * sizeof(int), cudaMemcpyDeviceToDevice);
 
-            dim3 fullBlocksPerGrid((round_n + blockSize - 1) / blockSize);
-
-            // Upsweep
             for (int d = 0; d < ilog2ceil(n); d++) {
-                // Optimisation to get faster runtime.
                 int nodes = round_n >> (d + 1);
-                if (nodes == 0) {
-                    break;
-                }
-                // Call fullBlocksPerGrid with new node size.
+                if (nodes == 0) break;
                 dim3 fullBlocksPerGrid((nodes + blockSize - 1) / blockSize);
-                kernUpsweep << <fullBlocksPerGrid, blockSize >> > (round_n, d, dev_buffer);
-                checkCUDAError("kernUpsweep failed.");
-                cudaDeviceSynchronize();
+                kernUpsweep << < fullBlocksPerGrid, blockSize >> > (round_n, d, dev_buffer);
             }
 
-            // Downsweep
             cudaMemset(dev_buffer + (round_n - 1), 0, sizeof(int));
+
             for (int d = ilog2ceil(n) - 1; d >= 0; d--) {
-                // Optimisation to get faster runtime.
                 int nodes = round_n >> (d + 1);
-                if (nodes == 0) {
-                    break;
-                }
-                // Call fullBlocksPerGrid with new node size.
+                if (nodes == 0) break;
                 dim3 fullBlocksPerGrid((nodes + blockSize - 1) / blockSize);
-                kernDownsweep << <fullBlocksPerGrid, blockSize >> > (round_n, d, dev_buffer);
-                checkCUDAError("kernDownsweep failed.");
-                cudaDeviceSynchronize();
+                kernDownsweep << < fullBlocksPerGrid, blockSize >> > (round_n, d, dev_buffer);
             }
 
-            // Copy result into dev_out
-            cudaMemcpy(odata, dev_buffer, n * sizeof(int), cudaMemcpyDeviceToDevice);
+            // Copy result into output (device to device)
+            cudaMemcpy(dev_odata, dev_buffer, n * sizeof(int), cudaMemcpyDeviceToDevice);
 
             cudaFree(dev_buffer);
         }

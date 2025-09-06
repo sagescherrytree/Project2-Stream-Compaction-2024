@@ -43,14 +43,16 @@ namespace StreamCompaction {
         }
 
         // Scatter based on address d.
-        __global__ void kernScatterRadix(int n, int* d, int* b, int * t, int* f) {
-            int index = threadIdx.x + (blockIdx.x * blockDim.x);
+        __global__ void kernScatterRadix(int n, int* idata, int* odata, int* b, int* t, int* f) {
+            int index = threadIdx.x + blockIdx.x * blockDim.x;
+            if (index >= n) return;
 
-            if (index >= n) {
-                return;
+            if (b[index] == 0) {
+                odata[f[index]] = idata[index];
             }
-
-            d[index] = b[index] ? t[index] : f[index];
+            else {
+                odata[t[index]] = idata[index];
+            }
         }
 
         /**
@@ -65,7 +67,6 @@ namespace StreamCompaction {
             int* dev_e;
             int* dev_f;
             int* dev_t;
-            int* dev_d;
 
             int totalFalse;
 
@@ -87,45 +88,36 @@ namespace StreamCompaction {
             cudaMalloc((void**)&dev_t, n * sizeof(int));
             checkCUDAError("cudaMalloc failed to create buffer.");
 
-            cudaMalloc((void**)&dev_d, n * sizeof(int));
-            checkCUDAError("cudaMalloc failed to create buffer.");
-
             cudaMemcpy(dev_idata, idata, n * sizeof(int), cudaMemcpyHostToDevice);
             dim3 fullBlocksPerGrid((n + blockSize - 1) / blockSize);
 
             timer().startGpuTimer();
             // For loop through int size.
-            for (int i = 0; i < sizeof(int); i++) {
-                // Step 1: Fill both b and e arrays from idata using kernComputeInverseBits.
-                kernComputeInverseBits << < fullBlocksPerGrid, blockSize >> > (n, i, dev_idata, dev_b, dev_e);
+            for (int i = 0; i < sizeof(int) * 8; i++) {
+                // Step 1: compute b and e
+                kernComputeInverseBits << <fullBlocksPerGrid, blockSize >> > (n, i, dev_idata, dev_b, dev_e);
                 cudaDeviceSynchronize();
 
-                // Step 2: Exclusive scan e to obtain f (call Efficient scan from efficient.cu).
-                StreamCompaction::Efficient::scan(n, dev_e, dev_f);
-
-                // Step 3: Compute total false.
-                
-                int lastE = 0;
-                int lastF = 0;
-
-                cudaMemcpy(&lastE, &dev_e[n - 1], sizeof(int), cudaMemcpyDeviceToHost);
-                cudaMemcpy(&lastF, &dev_f[n - 1], sizeof(int), cudaMemcpyDeviceToHost);
+                // Step 2: scan e -> f
+                StreamCompaction::Efficient::scanDevice(n, dev_f, dev_e);
                 cudaDeviceSynchronize();
 
-                totalFalse = lastE + lastF;
+                // Step 3: compute totalFalse
+                int lastE, lastF;
+                cudaMemcpy(&lastE, dev_e + (n - 1), sizeof(int), cudaMemcpyDeviceToHost);
+                cudaMemcpy(&lastF, dev_f + (n - 1), sizeof(int), cudaMemcpyDeviceToHost);
+                int totalFalse = lastE + lastF;
 
-                // Step 4: Use total false to compute t.
-                kernComputeT << < fullBlocksPerGrid, blockSize >> > (n, dev_f, dev_t, totalFalse);
+                // Step 4: compute t
+                kernComputeT << <fullBlocksPerGrid, blockSize >> > (n, dev_f, dev_t, totalFalse);
                 cudaDeviceSynchronize();
 
-                // Step 5: Scatter based on address d.
-                kernScatterRadix << < fullBlocksPerGrid, blockSize >> > (n, dev_d, dev_b, dev_t, dev_f);
+                // Step 5: scatter values correctly
+                kernScatterRadix << <fullBlocksPerGrid, blockSize >> > (n, dev_idata, dev_odata, dev_b, dev_t, dev_f);
                 cudaDeviceSynchronize();
 
-                // Swap data points for input of next iteration.
-                int* temp = dev_idata;
-                dev_idata = dev_odata;
-                dev_odata = temp;
+                // Swap for next iteration
+                std::swap(dev_idata, dev_odata);
             }
             timer().endGpuTimer();
 
@@ -138,7 +130,6 @@ namespace StreamCompaction {
             cudaFree(dev_e);
             cudaFree(dev_f);
             cudaFree(dev_t);
-            cudaFree(dev_d);
         }
     }
 }

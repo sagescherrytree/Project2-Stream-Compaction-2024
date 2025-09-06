@@ -11,9 +11,10 @@
 #include <stream_compaction/naive.h>
 #include <stream_compaction/efficient.h>
 #include <stream_compaction/thrust.h>
+#include <stream_compaction/radix.h>
 #include "testing_helpers.hpp"
 
-const int SIZE = 1 << 22; // feel free to change the size of array
+const int SIZE = 1 << 6; // feel free to change the size of array
 const int NPOT = SIZE - 3; // Non-Power-Of-Two
 int *a = new int[SIZE];
 int *b = new int[SIZE];
@@ -146,6 +147,27 @@ int main(int argc, char* argv[]) {
     printElapsedTime(StreamCompaction::Efficient::timer().getGpuElapsedTimeForPreviousOperation(), "(CUDA Measured)");
     //printArray(count, c, true);
     printCmpLenResult(count, expectedNPOT, b, c);
+
+    printf("\n");
+    printf("*****************************\n");
+    printf("** RADIX SORT TESTS **\n");
+    printf("*****************************\n");
+
+    // Radix sort tests
+
+    genArray(SIZE - 1, a, SIZE - 1);
+    a[SIZE - 1] = 0;
+    printArray(SIZE, a, true);
+
+    zeroArray(SIZE, b);
+    printDesc("radix sort");
+    StreamCompaction::Radix::radixSort(SIZE, b, a);
+    printElapsedTime(StreamCompaction::Radix::timer().getGpuElapsedTimeForPreviousOperation(), "(CUDA Measured)");
+
+    std::copy(a, a + SIZE, c);
+    std::sort(c, c + SIZE);
+
+    printCmpResult(SIZE, b, c);
 
     system("pause"); // stop Win32 console from closing on exit
     delete[] a;
